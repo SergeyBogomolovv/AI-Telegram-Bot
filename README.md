@@ -16,7 +16,7 @@
 ### 1. Клонируйте репозиторий
 
 ```bash
-git clone https://github.com/yourusername/telegram-ai-role-bot.git
+git clone https://github.com/SergeyBogomolovv/AI-Telegram-Bot.git telegram-ai-role-bot
 cd telegram-ai-role-bot
 ```
 
