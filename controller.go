@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"sync"
 	"time"
 
 	"github.com/PaulSonOfLars/gotgbot/v2"
@@ -19,6 +20,7 @@ type controller struct {
 	waitingForRole map[int64]bool
 	chats          map[int64]Chat
 	llm            llms.Model
+	mu             sync.RWMutex
 }
 
 type Controller interface {
@@ -75,7 +77,7 @@ func (c *controller) Stop() error {
 
 func (c *controller) messageFilter(msg *gotgbot.Message) bool {
 	chatID := msg.Chat.Id
-	if c.waitingForRole[chatID] {
+	if c.isWaitingForRole(chatID) {
 		return true
 	}
 
@@ -97,22 +99,37 @@ func (c *controller) messageFilter(msg *gotgbot.Message) bool {
 	return false
 }
 
-func (c *controller) createChatIfNotExists(chatId int64) {
-	if _, exists := c.chats[chatId]; !exists {
-		c.chats[chatId] = NewChat(c.llm)
+func (c *controller) getOrCreateChat(chatId int64) Chat {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	chat, exists := c.chats[chatId]
+	if !exists {
+		chat = NewChat(c.llm)
+		c.chats[chatId] = chat
 	}
+	return chat
+}
+
+func (c *controller) isWaitingForRole(chatId int64) bool {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.waitingForRole[chatId]
+}
+
+func (c *controller) setState(chatId int64, state bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.waitingForRole[chatId] = state
 }
 
 func (c *controller) startHandler(b *gotgbot.Bot, ctx *ext.Context) error {
-	c.createChatIfNotExists(ctx.EffectiveChat.Id)
 	_, err := ctx.EffectiveMessage.Reply(b, "Привет! Я бот, который будет тем кем тебе захочется. Используй /setrole для задания роли.", nil)
 	return err
 }
 
 func (c *controller) setRoleHandler(b *gotgbot.Bot, ctx *ext.Context) error {
 	chatId := ctx.EffectiveChat.Id
-	c.createChatIfNotExists(chatId)
-	c.waitingForRole[chatId] = true
+	c.setState(chatId, true)
 
 	_, err := ctx.EffectiveMessage.Reply(b, "Напишите кем мне быть", nil)
 	return err
@@ -122,19 +139,19 @@ func (c *controller) messageHandler(b *gotgbot.Bot, ctx *ext.Context) error {
 	msg := ctx.EffectiveMessage
 	chat := ctx.EffectiveChat
 
-	c.createChatIfNotExists(chat.Id)
+	aiChat := c.getOrCreateChat(chat.Id)
 
 	// Задание роли
-	if c.waitingForRole[chat.Id] {
-		delete(c.waitingForRole, chat.Id)
-		c.chats[chat.Id].SetRole(context.TODO(), msg.Text)
+	if c.isWaitingForRole(chat.Id) {
+		c.setState(chat.Id, false)
+		aiChat.SetRole(context.TODO(), msg.Text)
 		_, err := ctx.EffectiveMessage.Reply(b, "Роль установлена!", nil)
 		return err
 	}
 
 	// Личное сообщение боту
 	if chat.Type == "private" {
-		resp, err := c.chats[chat.Id].GenerateContentForUser(context.TODO(), msg.Text)
+		resp, err := aiChat.GenerateContentForUser(context.TODO(), msg.Text)
 		if err != nil {
 			return fmt.Errorf("failed to generate response: %w", err)
 		}
@@ -146,7 +163,7 @@ func (c *controller) messageHandler(b *gotgbot.Bot, ctx *ext.Context) error {
 
 	// В группе: бот упомянут и это ответ на сообщение
 	if chat.Type == "group" || chat.Type == "supergroup" {
-		resp, err := c.chats[chat.Id].GenerateContentForUser(context.TODO(), msg.ReplyToMessage.Text)
+		resp, err := aiChat.GenerateContentForUser(context.TODO(), msg.ReplyToMessage.Text)
 		if err != nil {
 			return fmt.Errorf("failed to generate response: %w", err)
 		}
