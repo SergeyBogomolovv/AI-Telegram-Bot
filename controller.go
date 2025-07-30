@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"log"
-	"sync"
 	"time"
 
 	"github.com/PaulSonOfLars/gotgbot/v2"
@@ -14,13 +13,11 @@ import (
 )
 
 type controller struct {
-	bot            *gotgbot.Bot
-	updater        *ext.Updater
-	dispatcher     *ext.Dispatcher
-	waitingForRole map[int64]bool
-	chats          map[int64]Chat
-	llm            llms.Model
-	mu             sync.RWMutex
+	bot        *gotgbot.Bot
+	updater    *ext.Updater
+	dispatcher *ext.Dispatcher
+	state      StateStorage
+	chats      ChatStorage
 }
 
 type Controller interface {
@@ -44,13 +41,15 @@ func NewController(token string, llm llms.Model) Controller {
 
 	updater := ext.NewUpdater(dispatcher, nil)
 
+	chatStorage := NewChatStorage(llm)
+	stateStorage := NewStateStorage()
+
 	return &controller{
-		bot:            b,
-		updater:        updater,
-		dispatcher:     dispatcher,
-		waitingForRole: make(map[int64]bool),
-		chats:          make(map[int64]Chat),
-		llm:            llm,
+		bot:        b,
+		updater:    updater,
+		dispatcher: dispatcher,
+		state:      stateStorage,
+		chats:      chatStorage,
 	}
 }
 
@@ -77,7 +76,7 @@ func (c *controller) Stop() error {
 
 func (c *controller) messageFilter(msg *gotgbot.Message) bool {
 	chatID := msg.Chat.Id
-	if c.isWaitingForRole(chatID) {
+	if c.state.IsWaitingForRole(chatID) {
 		return true
 	}
 
@@ -99,29 +98,6 @@ func (c *controller) messageFilter(msg *gotgbot.Message) bool {
 	return false
 }
 
-func (c *controller) getOrCreateChat(chatId int64) Chat {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	chat, exists := c.chats[chatId]
-	if !exists {
-		chat = NewChat(c.llm)
-		c.chats[chatId] = chat
-	}
-	return chat
-}
-
-func (c *controller) isWaitingForRole(chatId int64) bool {
-	c.mu.RLock()
-	defer c.mu.RUnlock()
-	return c.waitingForRole[chatId]
-}
-
-func (c *controller) setState(chatId int64, state bool) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	c.waitingForRole[chatId] = state
-}
-
 func (c *controller) startHandler(b *gotgbot.Bot, ctx *ext.Context) error {
 	_, err := ctx.EffectiveMessage.Reply(b, "Привет! Я бот, который будет тем кем тебе захочется. Используй /setrole для задания роли.", nil)
 	return err
@@ -129,7 +105,7 @@ func (c *controller) startHandler(b *gotgbot.Bot, ctx *ext.Context) error {
 
 func (c *controller) setRoleHandler(b *gotgbot.Bot, ctx *ext.Context) error {
 	chatId := ctx.EffectiveChat.Id
-	c.setState(chatId, true)
+	c.state.SetWaitingForRole(chatId, true)
 
 	_, err := ctx.EffectiveMessage.Reply(b, "Напишите кем мне быть", nil)
 	return err
@@ -139,11 +115,11 @@ func (c *controller) messageHandler(b *gotgbot.Bot, ctx *ext.Context) error {
 	msg := ctx.EffectiveMessage
 	chat := ctx.EffectiveChat
 
-	aiChat := c.getOrCreateChat(chat.Id)
+	aiChat := c.chats.GetOrCreateChat(chat.Id)
 
 	// Задание роли
-	if c.isWaitingForRole(chat.Id) {
-		c.setState(chat.Id, false)
+	if c.state.IsWaitingForRole(chat.Id) {
+		c.state.SetWaitingForRole(chat.Id, false)
 		aiChat.SetRole(context.TODO(), msg.Text)
 		_, err := ctx.EffectiveMessage.Reply(b, "Роль установлена!", nil)
 		return err
